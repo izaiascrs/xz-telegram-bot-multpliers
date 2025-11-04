@@ -1,0 +1,501 @@
+import "dotenv/config";
+import { MoneyManagementV2 } from "./money-management/types";
+import { TradeService } from "./database/trade-service";
+import { initDatabase } from "./database/schema";
+import { MoneyManager } from "./money-management/moneyManager";
+import { schedule } from 'node-cron';
+import { BuyContractRequest, Candles, ContractStatus } from "@deriv/api-types";
+import { TelegramManager } from "./telegram";
+import apiManager from "./ws";
+import { DERIV_TOKEN } from "./utils/constants";
+import { TradeWinRateManger } from "./utils/trade-win-rate-manager";
+import TechnicalAnalysis from "./technical-analysis";
+
+const ta = TechnicalAnalysis.getInstance();
+
+type TSymbol = (typeof symbols)[number];
+const symbols = ["R_10"] as const;
+
+const BALANCE_TO_START_TRADING = 100;
+const CONTRACT_SECONDS = 2;
+
+const config: MoneyManagementV2 = {
+  type: "fixed",
+  initialStake: 10,
+  profitPercent: 99,
+  maxStake: 600,
+  maxLoss: 200,  
+  winsBeforeMartingale: 0,
+  initialBalance: BALANCE_TO_START_TRADING,
+  targetProfit: 1000,
+};
+
+const tradeConfig = {
+  ticksCount: 10, 
+}
+
+let isAuthorized = false;
+let isTrading = false;
+let consecutiveWins = 0;
+let lastContractId: number | undefined = undefined;
+let lastContractIntervalId: NodeJS.Timeout | null = null;
+let tickCount = 0;
+let waitingVirtualLoss = false;
+
+let subscriptions: {
+  ticks?: any;
+  contracts?: any;
+} = {};
+
+// Adicionar um array para controlar todas as subscrições ativas
+let activeSubscriptions: any[] = [];
+
+// Inicializar o banco de dados
+const database = initDatabase();
+const tradeService = new TradeService(database);
+const tradeWinRateManager = new TradeWinRateManger();
+const telegramManager = new TelegramManager(tradeService, tradeWinRateManager);
+const moneyManager = new MoneyManager(config, config.initialBalance);
+
+let retryToGetLastTradeCount = 0;
+
+
+// running every minute - America/Sao_Paulo
+const task = schedule('* * * * *', async () => {
+  updateActivityTimestamp();
+
+  if(lastContractId) {
+    getLastTradeResult(lastContractId);
+  }
+
+  if(telegramManager.isRunningBot() === false) {
+    console.log("bot is not running!");
+    return;
+  }
+  try {
+    
+    const candlesReq = await apiManager.augmentedSend("ticks_history", { 
+      ticks_history: "R_10",
+      end: "latest",
+      style: "candles",
+      granularity: 60, // 1 minute
+      // @ts-ignore
+      count: 500
+    });
+  
+    const data = candlesReq.candles ?? [];
+    const candlesData = data.map(formatCandle);
+  
+    const zeroLagData = ta.zeroLagTrend(candlesData, {
+      length: 70,
+      mult: 1.2,
+    });
+
+    // change occur on second last candle
+    const lastZeroLagData = zeroLagData.at(-2);
+    
+    if(!lastZeroLagData) return;
+    if (lastZeroLagData.trendChange === false) {
+      return;
+    }
+
+    if (!isAuthorized) {
+      const authorized = await authorize();
+      if(!authorized) {
+        telegramManager.sendMessage("Fail to authorize account!");
+        return;
+      }
+    }
+  
+    let contractType: NonNullable<BuyContractRequest["parameters"]>["contract_type"] = "MULTUP";
+  
+    // bearish trend
+    if(lastZeroLagData.trend === -1) {
+      contractType = "MULTDOWN"
+    }
+  
+    const stake = moneyManager.calculateNextStake();
+    const canTrade = checkStakeAndBalance(stake);
+    if(canTrade === false) return;
+  
+    apiManager.augmentedSend("buy", {
+      buy: '1',
+      price: 1000,
+      parameters: {
+        contract_type: contractType,
+        multiplier: 4000,
+        currency: "USD",
+        symbol: "R_10",
+        amount: stake,
+        basis: "stake",
+        limit_order: {
+          take_profit: stake
+        }
+      }
+    }).then((res) => {
+      lastContractId = res.buy?.contract_id;
+      let message = "🎯 Sinal identificado!\n"+
+      `💰 Valor da entrada: $${stake}\n` +
+      `🏁 Tipo de contrato: ${contractType}`;
+      telegramManager.sendMessage(message);
+    }).catch((err) => {
+      console.error(err);
+      telegramManager.sendMessage("Error trying to buy contract")
+    })
+
+  } catch (error) {
+    console.log("error", error);    
+  }
+  
+}, {
+  scheduled: false,
+  timezone: "America/Sao_Paulo"
+});
+
+// Configura callback para quando atingir o lucro alvo
+moneyManager.setOnTargetReached(async (profit, balance) => {
+  const message = `🎯 Lucro alvo atingido!\n\n` +
+    `💰 Lucro: $${profit.toFixed(2)}\n` +
+    `🎯 Meta: $${config.targetProfit}\n` +
+    `💵 Saldo: $${balance.toFixed(2)}\n\n` +
+    `✨ Bot será reiniciado automaticamente amanhã às 09:00\n` +
+    `🛑 Bot parado com sucesso!`;
+
+  telegramManager.sendMessage(message);
+  await stopBot();
+  telegramManager.setBotRunning(false);
+});
+
+const ticksMap = new Map<TSymbol, number[]>([]);
+
+type TCandle = {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  time: number;
+}
+
+function formatCandle(candle: Candles[number] & { open_time?: string }) {  
+  return {
+    time: (candle.open_time || candle.epoch) as unknown as number,
+    open: +(candle.open ?? 0),
+    high: +(candle.high ?? 0),
+    low:  +(candle.low ?? 0),
+    close: +(candle.close ?? 0),
+  };
+}
+
+function clearTradeTimeout() {
+  if(lastContractIntervalId) {
+    clearInterval(lastContractIntervalId);
+    lastContractIntervalId = null;
+    lastContractId = undefined;
+  }
+}
+
+function handleTradeResult({
+  profit,
+  stake,
+  status,
+  exit_tick_display_value,
+  tick_stream,
+}: {
+  profit: number;
+  stake: number;
+  status: ContractStatus;
+  exit_tick_display_value: string | undefined;
+  tick_stream:  {
+    epoch?: number;
+    tick?: null | number;
+    tick_display_value?: null | string;
+  }[] | undefined
+}) {
+
+  updateActivityTimestamp();
+
+  if(status === "open") return;
+
+  const isWin = status === "won" || (status === "sold" && profit > 0);
+  
+  // Calcular novo saldo baseado no resultado
+  const currentBalance = moneyManager.getCurrentBalance();
+  let newBalance = currentBalance;
+
+  isTrading = false;
+  lastContractId = undefined;
+  // waitingVirtualLoss = !isWin;
+  
+  if (isWin) {
+    newBalance = currentBalance + profit;
+    consecutiveWins++;
+  } else {
+    newBalance = currentBalance - stake;
+    consecutiveWins = 0;
+  }
+  
+  // moneyManager.updateBalance(Number(newBalance.toFixed(2)));
+  moneyManager.updateLastTrade(isWin);
+  telegramManager.updateTradeResult(isWin, moneyManager.getCurrentBalance());
+
+  const resultMessage = isWin ? "✅ Trade ganho!" : "❌ Trade perdido!";
+  telegramManager.sendMessage(
+    `${resultMessage}\n` +
+    `💰 ${isWin ? 'Lucro' : 'Prejuízo'}: $${isWin ? profit : stake}\n` +
+    `💵 Saldo: $${moneyManager.getCurrentBalance().toFixed(2)}`
+  );  
+
+  // Salvar trade no banco
+  tradeService.saveTrade({
+    isWin,
+    stake,
+    profit: isWin ? profit : -stake,
+    balanceAfter: newBalance
+  }).catch(err => console.error('Erro ao salvar trade:', err));
+
+  clearTradeTimeout();
+
+
+  tradeWinRateManager.updateTradeResult(isWin);
+
+}
+
+async function getLastTradeResult(contractId: number | undefined) {
+  if(!contractId) return;  
+  if(retryToGetLastTradeCount >= 2) return;
+  try {
+    const data = await apiManager.augmentedSend('proposal_open_contract', { contract_id: contractId });    
+
+    if(!data.proposal_open_contract?.is_expired) return;
+    
+    const contract = data.proposal_open_contract;
+    const profit = contract?.profit ?? 0;
+    const stake = contract?.buy_price ?? 0;
+    const status = contract?.status;
+    const exit_tick_display_value = contract?.exit_tick_display_value;
+    const tick_stream = contract?.tick_stream;
+    retryToGetLastTradeCount = 0;
+  
+    handleTradeResult({
+      profit,
+      stake,
+      status: status ?? profit > 0 ? "won" : "lost",
+      exit_tick_display_value,
+      tick_stream
+    });    
+
+    isTrading = false;
+    lastContractId = undefined;
+    // waitingVirtualLoss = false;
+    tickCount = 0;
+  } catch (error: any) {
+    console.log("error trying to get last Trade!", error);
+    const codeError = error?.error?.code;
+    if(codeError && codeError === "AuthorizationRequired") {
+      retryToGetLastTradeCount++;
+      await authorize()
+        .then(() => getLastTradeResult(contractId))
+        .catch((err) => console.error("Error trying to login", err))
+    }
+  }
+
+}
+
+const checkStakeAndBalance = (stake: number) => {
+  if (stake < 1 || moneyManager.getCurrentBalance() < 1) {
+    telegramManager.sendMessage(
+      "🚨 *ALERTA CRÍTICO*\n\n" +
+        "❌ Bot finalizado automaticamente!\n" +
+        "💰 Saldo ou stake chegou a zero\n" +
+        `💵 Saldo final: $${moneyManager.getCurrentBalance().toFixed(2)}`
+    );
+    stopBot();
+    return false;
+  }
+  return true;
+};
+
+const clearSubscriptions = async () => {
+  try {
+    // Limpar todas as subscrições ativas
+    for (const subscription of activeSubscriptions) {
+      if (subscription) {
+        try {
+          subscription.unsubscribe();
+        } catch (error) {
+          console.error("Erro ao limpar subscrição:", error);
+        }
+      }
+    }
+    
+    // Limpar array de subscrições
+    activeSubscriptions = [];
+    
+    // Limpar objeto de subscrições
+    subscriptions = {};
+
+    // Resetar todos os estados
+    isTrading = false;
+    // waitingVirtualLoss = false;
+    isAuthorized = false;
+    ticksMap.clear();
+
+    console.log("Subscrições limpas. Total agora:", activeSubscriptions.length);
+
+    
+  } catch (error) {
+    console.error("Erro ao limpar subscrições:", error);
+  }
+};
+
+const startBot = async () => {
+  updateActivityTimestamp(); // Atualizar timestamp ao iniciar o bot
+  await clearSubscriptions();
+
+  if (!isAuthorized) {
+    await authorize();
+  }
+
+  try {
+    telegramManager.setBotRunning(true); // Define o estado como rodando ANTES de criar as subscrições
+    subscriptions.contracts = subscribeToOpenOrders();
+    
+    if (!subscriptions.contracts) {
+      throw new Error("Falha ao criar subscrições");
+    }
+
+    telegramManager.sendMessage("🤖 Bot iniciado e conectado aos serviços Deriv");
+  } catch (error) {
+    console.error("Erro ao iniciar bot:", error);
+    telegramManager.sendMessage("❌ Erro ao iniciar o bot. Tentando parar e limpar as conexões...");
+    telegramManager.setBotRunning(false);
+    await stopBot();
+  }
+};
+
+const stopBot = async () => {
+  updateActivityTimestamp(); // Atualizar timestamp ao parar o bot
+  await clearSubscriptions();
+  isTrading = false;
+  retryToGetLastTradeCount = 0;
+  telegramManager.sendMessage("🛑 Bot parado e desconectado dos serviços Deriv");
+};
+
+const subscribeToOpenOrders = () => {
+  const contractSub = apiManager.augmentedSubscribe("proposal_open_contract");
+  
+  const subscription = contractSub.subscribe((data) => {
+    updateActivityTimestamp();
+
+    lastContractId = data.proposal_open_contract?.contract_id;
+
+    if (!telegramManager.isRunningBot()) {
+      subscription.unsubscribe();
+      const index = activeSubscriptions.indexOf(subscription);
+      if (index > -1) {
+        activeSubscriptions.splice(index, 1);
+      }
+      return;
+    }
+
+    const contract = data.proposal_open_contract;
+    const status = contract?.status;
+    const profit = contract?.profit ?? 0;
+    const stake = contract?.buy_price || 0;
+    const exit_tick_display_value = contract?.exit_tick_display_value;
+    const tick_stream = contract?.tick_stream;
+
+    handleTradeResult({
+      profit,
+      stake,
+      status: status ?? "open",
+      exit_tick_display_value,
+      tick_stream
+    });
+
+  },(err) => {
+    console.log("CONTRACT SUBSCRIPTION ERROR", err);    
+  });
+
+  activeSubscriptions.push(subscription);
+  return contractSub;
+};
+
+const authorize = async () => {
+  try {
+    await apiManager.authorize(DERIV_TOKEN);
+    isAuthorized = true;
+    telegramManager.sendMessage("🔐 Bot autorizado com sucesso na Deriv");
+    return true;
+  } catch (err) {
+    isAuthorized = false;
+    telegramManager.sendMessage("❌ Erro ao autorizar bot na Deriv");
+    await clearSubscriptions();
+    return false;
+  }
+};
+
+// Adicionar verificação periódica do estado do bot
+setInterval(async () => {
+  if (telegramManager.isRunningBot() && !waitingVirtualLoss && moneyManager.getCurrentBalance() > 0) {
+    // Verificar se o bot está "travado"
+    const lastActivity = Date.now() - lastActivityTimestamp;
+    if (lastActivity > (60_000 * 40)) { // 40 minutos sem atividade
+      console.log("Detectado possível travamento do bot, resetando estados...");
+      isTrading = false;
+      // waitingVirtualLoss = false;
+      lastActivityTimestamp = Date.now();
+      await clearSubscriptions();
+    }
+  }
+
+  apiManager.augmentedSend("ping").catch(console.error);
+}, (28_000)); // 30 seconds
+
+// Adicionar timestamp da última atividade
+let lastActivityTimestamp = Date.now();
+
+// Atualizar o timestamp em momentos importantes
+const updateActivityTimestamp = () => {
+  lastActivityTimestamp = Date.now();
+};
+
+
+async function main() {
+  task.start();
+
+  apiManager.connection.addEventListener("open", async () => {
+    telegramManager.sendMessage("🌐 Conexão WebSocket estabelecida");
+    await authorize();
+  });
+
+  apiManager.connection.addEventListener("close", async () => {
+    isAuthorized = false;
+    await clearSubscriptions();
+    telegramManager.sendMessage("⚠️ Conexão WebSocket fechada");
+  });
+
+  apiManager.connection.addEventListener("error", async (event) => {
+    console.error("Erro na conexão:", event);
+    isAuthorized = false;
+    telegramManager.sendMessage("❌ Erro na conexão com o servidor Deriv");
+    await clearSubscriptions();
+  });
+
+  // Observadores do estado do bot do Telegram
+  setInterval(async () => {
+    // Se o bot está marcado como rodando mas não tem subscrições, tenta reconectar
+    if (telegramManager.isRunningBot() && !subscriptions.contracts) {
+      console.log("Tentando reconectar bot...");
+      await clearSubscriptions();
+      await startBot();
+    } 
+    // Se o bot não está marcado como rodando MAS tem subscrições ativas, limpa as subscrições
+    else if (!telegramManager.isRunningBot() && subscriptions.contracts) {
+      console.log("Limpando subscrições pendentes...");      
+      await clearSubscriptions();
+    }
+  }, 10_000);
+}
+
+main();
