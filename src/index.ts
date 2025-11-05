@@ -14,7 +14,23 @@ import TechnicalAnalysis from "./technical-analysis";
 const ta = TechnicalAnalysis.getInstance();
 
 type TSymbol = (typeof symbols)[number];
-const symbols = ["R_10"] as const;
+const symbols = ["R_10", "R_25", "R_50", "R_75", "R_100"] as const;
+
+const multipliersMap = new Map<TSymbol, number>([
+  ["R_10", 4000], // normal
+  ["R_25", 1200], // normal
+  ["R_50", 800], // normal
+  ["R_75", 500], // normal
+  ["R_100", 400], // normal
+]);
+
+const multipliersDirectionMap = new Map<TSymbol, boolean>([
+  ["R_10", true], // normal
+  ["R_25", false], // normal
+  ["R_50", true], // normal
+  ["R_75", true], // normal
+  ["R_100", true], // normal
+]);
 
 const BALANCE_TO_START_TRADING = 100;
 const CONTRACT_SECONDS = 2;
@@ -22,7 +38,7 @@ const CONTRACT_SECONDS = 2;
 const config: MoneyManagementV2 = {
   type: "fixed",
   initialStake: 10,
-  profitPercent: 99,
+  profitPercent: 100,
   maxStake: 600,
   maxLoss: 200,  
   winsBeforeMartingale: 0,
@@ -72,76 +88,90 @@ const task = schedule('* * * * *', async () => {
     console.log("bot is not running!");
     return;
   }
+
+  if(isTrading) return;
+
   try {
-    
-    const candlesReq = await apiManager.augmentedSend("ticks_history", { 
-      ticks_history: "R_10",
-      end: "latest",
-      style: "candles",
-      granularity: 60, // 1 minute
-      // @ts-ignore
-      count: 500
-    });
-  
-    const data = candlesReq.candles ?? [];
-    const candlesData = data.map(formatCandle);
-  
-    const zeroLagData = ta.zeroLagTrend(candlesData, {
-      length: 70,
-      mult: 1.2,
-    });
+    for (let i = 0; i < symbols.length; i++) {
+      const symbol = symbols[i];
 
-    // change occur on second last candle
-    const lastZeroLagData = zeroLagData.at(-2);
+      // break if is trading
+      if(isTrading) return;
+      
+      await new Promise((res) => setTimeout(res, 200));
+        
+      const candlesReq = await apiManager.augmentedSend("ticks_history", { 
+        ticks_history: symbol,
+        end: "latest",
+        style: "candles",
+        granularity: 60, // 1 minute
+        // @ts-ignore
+        count: 500
+      });
     
-    if(!lastZeroLagData) return;
-    if (lastZeroLagData.trendChange === false) {
-      return;
-    }
-  
-    let contractType: NonNullable<BuyContractRequest["parameters"]>["contract_type"] = "MULTUP";
-  
-    // bearish trend
-    if(lastZeroLagData.trend === -1) {
-      contractType = "MULTDOWN"
-    }
-  
-    const stake = moneyManager.calculateNextStake();
-    const canTrade = checkStakeAndBalance(stake);
-    if(canTrade === false) return;
+      const data = candlesReq.candles ?? [];
+      const candlesData = data.map(formatCandle);
+    
+      const zeroLagData = ta.zeroLagTrend(candlesData, {
+        length: 70,
+        mult: 1.2,
+      });
 
+      // change occur on second last candle
+      const lastZeroLagData = zeroLagData.at(-2);
+      
+      if(!lastZeroLagData) continue;
+      if (lastZeroLagData.trendChange === false) continue;
     
-    const authorized = await authorize();
-    if(!authorized) {
-      telegramManager.sendMessage("Fail to authorize account!");
-      return;
-    }
-  
-    apiManager.augmentedSend("buy", {
-      buy: '1',
-      price: 1000,
-      parameters: {
-        contract_type: contractType,
-        multiplier: 4000,
-        currency: "USD",
-        symbol: "R_10",
-        amount: stake,
-        basis: "stake",
-        limit_order: {
-          take_profit: stake
-        }
+      let contractType: NonNullable<BuyContractRequest["parameters"]>["contract_type"] = "MULTUP";
+    
+      // bearish trend
+      if(lastZeroLagData.trend === -1) {
+        contractType = "MULTDOWN"
       }
-    }).then((res) => {
-      lastContractId = res.buy?.contract_id;
-      let message = "🎯 Sinal identificado!\n"+
-      `💰 Valor da entrada: $${stake}\n` +
-      `🏁 Tipo de contrato: ${contractType}\n` +
-      `🆔 ${lastContractId}`;
-      telegramManager.sendMessage(message);
-    }).catch((err) => {
-      console.error(err);
-      telegramManager.sendMessage("Error trying to buy contract")
-    })
+
+      if(multipliersDirectionMap.get(symbol) === false) {
+        contractType = (contractType === "MULTDOWN") ? "MULTUP" : "MULTDOWN";
+      }
+    
+      const stake = moneyManager.calculateNextStake();
+      const canTrade = checkStakeAndBalance(stake);
+      if(canTrade === false) continue;
+      
+      const authorized = await authorize();
+      if(!authorized) {
+        telegramManager.sendMessage("Fail to authorize account!");
+        continue;
+      }
+    
+      apiManager.augmentedSend("buy", {
+        buy: '1',
+        price: 1000,
+        parameters: {
+          contract_type: contractType,
+          multiplier: multipliersMap.get(symbol),
+          currency: "USD",
+          symbol: symbol,
+          amount: stake,
+          basis: "stake",
+          limit_order: {
+            take_profit: stake
+          }
+        }
+      }).then((res) => {
+        lastContractId = res.buy?.contract_id;
+        isTrading = true;
+        let message = "🎯 Sinal identificado!\n"+
+        `💰 Valor da entrada: $${stake}\n` +
+        `🏁 Tipo de contrato: ${contractType}\n` +
+        `📊 ${symbol.split("_").join("")}\n`+
+        `🆔 ${lastContractId}`;
+        telegramManager.sendMessage(message);
+      }).catch((err) => {
+        console.error(err);
+        telegramManager.sendMessage("Error trying to buy contract")
+      })
+    }
 
   } catch (error) {
     console.log("error", error);    
@@ -166,15 +196,6 @@ moneyManager.setOnTargetReached(async (profit, balance) => {
   telegramManager.setBotRunning(false);
 });
 
-const ticksMap = new Map<TSymbol, number[]>([]);
-
-type TCandle = {
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  time: number;
-}
 
 function formatCandle(candle: Candles[number] & { open_time?: string }) {  
   return {
@@ -216,7 +237,8 @@ function handleTradeResult({
 
   if(status === "open") return;
 
-  const isWin = status === "won" || (status === "sold" && profit > 0);
+  // const isWin = status === "won" || (status === "sold" && profit > 0);
+  const isWin = profit > 0;
   
   // Calcular novo saldo baseado no resultado
   const currentBalance = moneyManager.getCurrentBalance();
@@ -338,7 +360,6 @@ const clearSubscriptions = async () => {
     isTrading = false;
     // waitingVirtualLoss = false;
     isAuthorized = false;
-    ticksMap.clear();
 
     console.log("Subscrições limpas. Total agora:", activeSubscriptions.length);
 
