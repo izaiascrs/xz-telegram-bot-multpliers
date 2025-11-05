@@ -98,14 +98,6 @@ const task = schedule('* * * * *', async () => {
     if (lastZeroLagData.trendChange === false) {
       return;
     }
-
-    if (!isAuthorized) {
-      const authorized = await authorize();
-      if(!authorized) {
-        telegramManager.sendMessage("Fail to authorize account!");
-        return;
-      }
-    }
   
     let contractType: NonNullable<BuyContractRequest["parameters"]>["contract_type"] = "MULTUP";
   
@@ -117,6 +109,13 @@ const task = schedule('* * * * *', async () => {
     const stake = moneyManager.calculateNextStake();
     const canTrade = checkStakeAndBalance(stake);
     if(canTrade === false) return;
+
+    
+    const authorized = await authorize();
+    if(!authorized) {
+      telegramManager.sendMessage("Fail to authorize account!");
+      return;
+    }
   
     apiManager.augmentedSend("buy", {
       buy: '1',
