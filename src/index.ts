@@ -136,7 +136,8 @@ const task = schedule('* * * * *', async () => {
       lastContractId = res.buy?.contract_id;
       let message = "🎯 Sinal identificado!\n"+
       `💰 Valor da entrada: $${stake}\n` +
-      `🏁 Tipo de contrato: ${contractType}`;
+      `🏁 Tipo de contrato: ${contractType}\n` +
+      `🆔 ${lastContractId}`;
       telegramManager.sendMessage(message);
     }).catch((err) => {
       console.error(err);
@@ -384,10 +385,8 @@ const stopBot = async () => {
 const subscribeToOpenOrders = () => {
   const contractSub = apiManager.augmentedSubscribe("proposal_open_contract");
   
-  const subscription = contractSub.subscribe((data) => {
+  const subscription = contractSub.subscribe(() => {
     updateActivityTimestamp();
-
-    lastContractId = data.proposal_open_contract?.contract_id;
 
     if (!telegramManager.isRunningBot()) {
       subscription.unsubscribe();
@@ -398,20 +397,20 @@ const subscribeToOpenOrders = () => {
       return;
     }
 
-    const contract = data.proposal_open_contract;
-    const status = contract?.status;
-    const profit = contract?.profit ?? 0;
-    const stake = contract?.buy_price || 0;
-    const exit_tick_display_value = contract?.exit_tick_display_value;
-    const tick_stream = contract?.tick_stream;
+    // const contract = data.proposal_open_contract;
+    // const status = contract?.status;
+    // const profit = contract?.profit ?? 0;
+    // const stake = contract?.buy_price || 0;
+    // const exit_tick_display_value = contract?.exit_tick_display_value;
+    // const tick_stream = contract?.tick_stream;
 
-    handleTradeResult({
-      profit,
-      stake,
-      status: status ?? "open",
-      exit_tick_display_value,
-      tick_stream
-    });
+    // handleTradeResult({
+    //   profit,
+    //   stake,
+    //   status: status ?? "open",
+    //   exit_tick_display_value,
+    //   tick_stream
+    // });
 
   },(err) => {
     console.log("CONTRACT SUBSCRIPTION ERROR", err);    
@@ -443,6 +442,7 @@ setInterval(async () => {
     if (lastActivity > (60_000 * 40)) { // 40 minutos sem atividade
       console.log("Detectado possível travamento do bot, resetando estados...");
       isTrading = false;
+      lastContractId = undefined;
       // waitingVirtualLoss = false;
       lastActivityTimestamp = Date.now();
       await clearSubscriptions();
