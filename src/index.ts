@@ -26,7 +26,7 @@ const multipliersMap = new Map<TSymbol, number>([
 
 const multipliersDirectionMap = new Map<TSymbol, boolean>([
   ["R_10", true], // normal
-  ["R_25", false], // normal
+  ["R_25", true], // normal
   ["R_50", true], // normal
   ["R_75", true], // normal
   ["R_100", true], // normal
