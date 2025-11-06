@@ -10,6 +10,8 @@ import apiManager from "./ws";
 import { DERIV_TOKEN } from "./utils/constants";
 import { TradeWinRateManger } from "./utils/trade-win-rate-manager";
 import TechnicalAnalysis from "./technical-analysis";
+import { formatMacd } from "./utils/macd";
+import { CandleData } from "./technical-analysis/types";
 
 const ta = TechnicalAnalysis.getInstance();
 
@@ -18,18 +20,18 @@ const symbols = ["R_10", "R_25", "R_50", "R_75", "R_100"] as const;
 
 const multipliersMap = new Map<TSymbol, number>([
   ["R_10", 4000], // normal
-  ["R_25", 1200], // normal
+  ["R_25", 1600], // normal
   ["R_50", 800], // normal
   ["R_75", 500], // normal
   ["R_100", 400], // normal
 ]);
 
-const multipliersDirectionMap = new Map<TSymbol, boolean>([
-  ["R_10", false], // normal
-  ["R_25", false], // normal
-  ["R_50", false], // normal
-  ["R_75", false], // normal
-  ["R_100", false], // normal
+const symbolsPipsNeeded = new Map<TSymbol, number>([
+  ["R_10", 1600], // normal
+  ["R_25", 2000], // normal
+  ["R_50", 1970], // normal
+  ["R_75", 1060], // normal
+  ["R_100", 230], // normal
 ]);
 
 const BALANCE_TO_START_TRADING = 1000;
@@ -75,9 +77,49 @@ const moneyManager = new MoneyManager(config, config.initialBalance);
 
 let retryToGetLastTradeCount = 0;
 
+type HistogramSignal = "increasing" | "decreasing" | "neutral";
+
+function checkHistogramSignal(candle: CandleData[]): HistogramSignal {
+  const { histData } = formatMacd({
+    candlesData: candle,
+    macdOptions: {
+      fastPeriod: 12,
+      slowPeriod: 26,
+      signalPeriod: 9,
+      SimpleMAOscillator: false,
+      SimpleMASignal: false,
+    }
+  });
+
+  const [thirdLast, secLast, last] = histData.slice(-3);
+
+  if(thirdLast?.value === undefined || secLast?.value === undefined || last?.value === undefined) return "neutral";
+
+  // first signal if the histogram is increasing ou decreasing
+  if(last.value > 0) {
+    const candleIncreasing = secLast.value > thirdLast.value;
+    // positive histogram check if is decreasing
+    if(candleIncreasing && last.value < secLast.value) return "decreasing"
+    return "neutral";
+  }
+
+  if(last.value < 0) {
+    const candleDecreasing = secLast.value < thirdLast.value;
+    // positive histogram check if is increasing
+    if(candleDecreasing && last.value > secLast.value) return "increasing";
+    return "neutral";
+  }
+
+  return "neutral";
+}
+
+function checkCandleType(candle: CandleData) {
+  if(candle.close > candle.open) return "bullish";
+  return "bearish";
+}
 
 // running every minute - America/Sao_Paulo
-const task = schedule('* * * * *', async () => {
+const task = schedule('56 * * * * *', async () => {
   updateActivityTimestamp();
 
   if(lastContractId) {
@@ -109,30 +151,86 @@ const task = schedule('* * * * *', async () => {
         count: 500
       });
     
-      const data = candlesReq.candles ?? [];
+      const data = (candlesReq.candles ?? [])
       const candlesData = data.map(formatCandle);
+
+      if(candlesData.length < 100) continue;
+
+      const histogramType = checkHistogramSignal(candlesData);
+
+      console.log("histogramType", histogramType);
+      
+
+      // 1 - check if we have a signal on histogram
+
+      // if no signal continue
+      if(histogramType === "neutral") continue;
+
+      const secondLastCandle = candlesData.at(-2);
+      if(!secondLastCandle) continue;
+
+      const secondLastCandleType = checkCandleType(secondLastCandle);
+
+      const lastCandle = candlesData.at(-1);
+      if(!lastCandle) continue;
+
+      const lastCandleType = checkCandleType(lastCandle)
+      console.log("lastCandleType", lastCandleType);
+      console.log("secondLastCandleType", secondLastCandleType);
+      
+      const validHistogramBearishSignal = histogramType === "decreasing" && secondLastCandleType === "bullish" && lastCandleType === "bearish";
+      const validHistogramBullishSignal = histogramType === "increasing" && secondLastCandleType === "bearish" && lastCandleType === "bullish";
+
+      console.log("validHistogramBearishSignal", validHistogramBearishSignal);
+      console.log("validHistogramBullishSignal", validHistogramBullishSignal);
+
+      if(!validHistogramBearishSignal && !validHistogramBullishSignal) continue;
     
       const zeroLagData = ta.zeroLagTrend(candlesData, {
         length: 70,
         mult: 1.2,
       });
 
-      // change occur on second last candle
-      const lastZeroLagData = zeroLagData.at(-2);
+      if(!zeroLagData || !zeroLagData.length) continue;
+
+      const lastZeroLag = zeroLagData.at(-1)!;
+
+      const zeroLagType = (lastZeroLag.trend === 1) ? "zero-bullish" : "zero-bearish";
+
+      console.log("zeroLagType", zeroLagType);
+
+      const validZeroLagBearishSignal = validHistogramBullishSignal && zeroLagType === "zero-bearish";
+      const validZeroLagBullishSignal = validHistogramBearishSignal && zeroLagType === "zero-bullish";
+
+      console.log("validZeroLagBearishSignal", validZeroLagBearishSignal);
+      console.log("validZeroLagBullishSignal", validZeroLagBullishSignal);
       
-      if(!lastZeroLagData) continue;
-      if (lastZeroLagData.trendChange === false) continue;
+      if(!validZeroLagBearishSignal && !validZeroLagBullishSignal) continue;
+
+      const validCandleUpperDistance = zeroLagType === "zero-bullish" && secondLastCandle.low > lastZeroLag.upperBand;
+      const validCandleLowerDistance = zeroLagType === "zero-bearish" && secondLastCandle.high < lastZeroLag.lowerBand;
+
+      console.log("validCandleUpperDistance", validCandleUpperDistance);
+      console.log("validCandleLowerDistance", validCandleLowerDistance);
+
+      if(!validCandleUpperDistance && !validCandleLowerDistance) continue;
+
+      // change occur on second last candle
+      // const lastZeroLagData = zeroLagData.at(-2);
+      
+      // if(!lastZeroLagData) continue;
+      // if (lastZeroLagData.trendChange === false) continue;
     
       let contractType: NonNullable<BuyContractRequest["parameters"]>["contract_type"] = "MULTUP";
     
       // bearish trend
-      if(lastZeroLagData.trend === -1) {
+      if(validCandleUpperDistance) {
         contractType = "MULTDOWN"
       }
 
-      if(multipliersDirectionMap.get(symbol) === false) {
-        contractType = (contractType === "MULTDOWN") ? "MULTUP" : "MULTDOWN";
-      }
+      // if(multipliersDirectionMap.get(symbol) === false) {
+      //   contractType = (contractType === "MULTDOWN") ? "MULTUP" : "MULTDOWN";
+      // }
     
       const stake = moneyManager.calculateNextStake();
       const canTrade = checkStakeAndBalance(stake);
@@ -356,8 +454,6 @@ const clearSubscriptions = async () => {
     // Limpar objeto de subscrições
     subscriptions = {};
 
-    // Resetar todos os estados
-    isTrading = false;
     // waitingVirtualLoss = false;
     isAuthorized = false;
 
