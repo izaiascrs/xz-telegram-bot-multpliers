@@ -158,8 +158,6 @@ const task = schedule('56 * * * * *', async () => {
 
       const histogramType = checkHistogramSignal(candlesData);
 
-      console.log("histogramType", histogramType);
-      
 
       // 1 - check if we have a signal on histogram
 
@@ -175,14 +173,9 @@ const task = schedule('56 * * * * *', async () => {
       if(!lastCandle) continue;
 
       const lastCandleType = checkCandleType(lastCandle)
-      console.log("lastCandleType", lastCandleType);
-      console.log("secondLastCandleType", secondLastCandleType);
       
       const validHistogramBearishSignal = histogramType === "decreasing" && secondLastCandleType === "bullish" && lastCandleType === "bearish";
       const validHistogramBullishSignal = histogramType === "increasing" && secondLastCandleType === "bearish" && lastCandleType === "bullish";
-
-      console.log("validHistogramBearishSignal", validHistogramBearishSignal);
-      console.log("validHistogramBullishSignal", validHistogramBullishSignal);
 
       if(!validHistogramBearishSignal && !validHistogramBullishSignal) continue;
     
@@ -197,21 +190,13 @@ const task = schedule('56 * * * * *', async () => {
 
       const zeroLagType = (lastZeroLag.trend === 1) ? "zero-bullish" : "zero-bearish";
 
-      console.log("zeroLagType", zeroLagType);
-
       const validZeroLagBearishSignal = validHistogramBullishSignal && zeroLagType === "zero-bearish";
       const validZeroLagBullishSignal = validHistogramBearishSignal && zeroLagType === "zero-bullish";
-
-      console.log("validZeroLagBearishSignal", validZeroLagBearishSignal);
-      console.log("validZeroLagBullishSignal", validZeroLagBullishSignal);
       
       if(!validZeroLagBearishSignal && !validZeroLagBullishSignal) continue;
 
       const validCandleUpperDistance = zeroLagType === "zero-bullish" && secondLastCandle.low > lastZeroLag.upperBand;
       const validCandleLowerDistance = zeroLagType === "zero-bearish" && secondLastCandle.high < lastZeroLag.lowerBand;
-
-      console.log("validCandleUpperDistance", validCandleUpperDistance);
-      console.log("validCandleLowerDistance", validCandleLowerDistance);
 
       if(!validCandleUpperDistance && !validCandleLowerDistance) continue;
 
@@ -221,11 +206,11 @@ const task = schedule('56 * * * * *', async () => {
       // if(!lastZeroLagData) continue;
       // if (lastZeroLagData.trendChange === false) continue;
     
-      let contractType: NonNullable<BuyContractRequest["parameters"]>["contract_type"] = "MULTUP";
+      let contractType: NonNullable<BuyContractRequest["parameters"]>["contract_type"] = "MULTDOWN";
     
       // bearish trend
       if(validCandleUpperDistance) {
-        contractType = "MULTDOWN"
+        contractType = "MULTUP"
       }
 
       // if(multipliersDirectionMap.get(symbol) === false) {
@@ -242,7 +227,7 @@ const task = schedule('56 * * * * *', async () => {
         continue;
       }
     
-      apiManager.augmentedSend("buy", {
+      const res = await apiManager.augmentedSend("buy", {
         buy: '1',
         price: 1000,
         parameters: {
@@ -256,23 +241,22 @@ const task = schedule('56 * * * * *', async () => {
             take_profit: stake
           }
         }
-      }).then((res) => {
-        lastContractId = res.buy?.contract_id;
-        isTrading = true;
-        let message = "🎯 Sinal identificado!\n"+
-        `💰 Valor da entrada: $${stake}\n` +
-        `🏁 Tipo de contrato: ${contractType}\n` +
-        `📊 ${symbol.split("_").join("")}\n`+
-        `🆔 ${lastContractId}`;
-        telegramManager.sendMessage(message);
-      }).catch((err) => {
-        console.error(err);
-        telegramManager.sendMessage("Error trying to buy contract")
       })
-    }
 
+      lastContractId = res.buy?.contract_id;
+      isTrading = true;
+      let message = "🎯 Sinal identificado!\n"+
+      `💰 Valor da entrada: $${stake}\n` +
+      `🏁 Tipo de contrato: ${contractType}\n` +
+      `📊 ${symbol.split("_").join("")}\n`+
+      `🆔 ${lastContractId}`;
+      telegramManager.sendMessage(message);
+
+    }
+    
   } catch (error) {
     console.log("error", error);    
+    telegramManager.sendMessage("Error trying to buy contract")
   }
   
 }, {
