@@ -19,11 +19,11 @@ type TSymbol = (typeof symbols)[number];
 const symbols = ["R_10", "R_25", "R_50", "R_75", "R_100"] as const;
 
 const multipliersMap = new Map<TSymbol, number>([
-  ["R_10", 4000], // normal
-  ["R_25", 1600], // normal
-  ["R_50", 800], // normal
-  ["R_75", 500], // normal
-  ["R_100", 400], // normal
+  ["R_10", 3000], // 3000 | 4000
+  ["R_25", 1200], // 1200 | 1600
+  ["R_50", 600], // 600 | 800
+  ["R_75", 300], // 300 | 500
+  ["R_100", 300], // 300 | 400
 ]);
 
 const symbolsPipsNeeded = new Map<TSymbol, number>([
@@ -206,11 +206,11 @@ const task = schedule('56 * * * * *', async () => {
       // if(!lastZeroLagData) continue;
       // if (lastZeroLagData.trendChange === false) continue;
     
-      let contractType: NonNullable<BuyContractRequest["parameters"]>["contract_type"] = "MULTDOWN";
+      let contractType: NonNullable<BuyContractRequest["parameters"]>["contract_type"] = "MULTUP";
     
       // bearish trend
       if(validCandleUpperDistance) {
-        contractType = "MULTUP"
+        contractType = "MULTDOWN"
       }
 
       // if(multipliersDirectionMap.get(symbol) === false) {
@@ -339,7 +339,7 @@ function handleTradeResult({
   }
   
   // moneyManager.updateBalance(Number(newBalance.toFixed(2)));
-  moneyManager.updateLastTrade(isWin);
+  moneyManager.updateLastTrade(isWin, profit);
   telegramManager.updateTradeResult(isWin, moneyManager.getCurrentBalance());
 
   const resultMessage = isWin ? "✅ Trade ganho!" : "❌ Trade perdido!";
