@@ -122,7 +122,7 @@ function checkCandleType(candle: CandleData) {
 const task = schedule('56 * * * * *', async () => {
   updateActivityTimestamp();
   await sellExpiredContract();
-
+  
   if(lastContractId) {
     getLastTradeResult(lastContractId);
   }
@@ -290,14 +290,6 @@ function formatCandle(candle: Candles[number] & { open_time?: string }) {
   };
 }
 
-function clearTradeTimeout() {
-  if(lastContractIntervalId) {
-    clearInterval(lastContractIntervalId);
-    lastContractIntervalId = null;
-    lastContractId = undefined;
-  }
-}
-
 function handleTradeResult({
   profit,
   stake,
@@ -335,7 +327,7 @@ function handleTradeResult({
     newBalance = currentBalance + profit;
     consecutiveWins++;
   } else {
-    newBalance = currentBalance - stake;
+    newBalance = currentBalance - Math.abs(profit);
     consecutiveWins = 0;
   }
   
@@ -346,7 +338,7 @@ function handleTradeResult({
   const resultMessage = isWin ? "✅ Trade ganho!" : "❌ Trade perdido!";
   telegramManager.sendMessage(
     `${resultMessage}\n` +
-    `💰 ${isWin ? 'Lucro' : 'Prejuízo'}: $${isWin ? profit : stake}\n` +
+    `💰 ${isWin ? 'Lucro' : 'Prejuízo'}: $${profit}\n` +
     `💵 Saldo: $${moneyManager.getCurrentBalance().toFixed(2)}`
   );  
 
@@ -354,23 +346,27 @@ function handleTradeResult({
   tradeService.saveTrade({
     isWin,
     stake,
-    profit: isWin ? profit : -stake,
+    profit: profit,
     balanceAfter: newBalance
   }).catch(err => console.error('Erro ao salvar trade:', err));
-
-  clearTradeTimeout();
 
   tradeWinRateManager.updateTradeResult(isWin);
 
 }
 
-async function getLastTradeResult(contractId: number | undefined) {
+async function getLastTradeResult(contractId: number | undefined) { 
   if(!contractId) return;  
   if(retryToGetLastTradeCount >= 2) return;
-  try {
-    const data = await apiManager.augmentedSend('proposal_open_contract', { contract_id: contractId });    
 
-    if(!data.proposal_open_contract?.is_expired) return;
+  try {
+    const data = await apiManager.augmentedSend('proposal_open_contract', { contract_id: contractId });
+
+    // console.dir(data.proposal_open_contract, { depth: null });
+
+    if(
+      !data.proposal_open_contract?.is_expired &&
+      (!data.proposal_open_contract?.status ||  data.proposal_open_contract?.status === "open")
+    ) return;
     
     const contract = data.proposal_open_contract;
     const profit = contract?.profit ?? 0;
@@ -475,12 +471,16 @@ const startBot = async () => {
 
 const sellOpenContract = async (contractId: number) => {
   try {
-    await apiManager.augmentedSend("sell", {
+    const res = await apiManager.augmentedSend("sell", {
       price: 0,
       sell: contractId,
     });
 
-    telegramManager.sendMessage("contract sold successfully.")
+    const msg = 
+    "⚠ contract sold successfully.\n"+
+    `🆔 ${contractId}`
+
+    telegramManager.sendMessage(msg)
   } catch (error) {
     console.error("error selling contract", error);    
   }
@@ -551,8 +551,6 @@ const subscribeToOpenOrders = () => {
       contractTrailingStop.set(contractId, { isExpired, stopProfit: 0, isSelling: false });
     }
 
-    if(contractTrailingStop.get(contractId)?.isSelling) return;
-
     const currentTStopObj = contractTrailingStop.get(contractId);
 
     if(!currentTStopObj) return;
@@ -567,6 +565,8 @@ const subscribeToOpenOrders = () => {
     }
 
     if(currentTrailingStop !== 0 && currentTrailingStop >= profit) {
+      console.log("SELLING TRAILING STOP HIT!...");
+      
       contractTrailingStop.set(contractId, { ...currentTStopObj, isSelling: true });
       await sellOpenContract(contractId);
     }
@@ -623,7 +623,6 @@ const updateActivityTimestamp = () => {
 async function sleep(ms: number) {
   return await new Promise((res) => setTimeout(res, ms));
 }
-
 
 async function main() {
   task.start();
