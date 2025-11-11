@@ -75,8 +75,8 @@ export class MoneyManager {
 
   updateLastTrade(success: boolean, profitValue?: number) {
     const stake = this.currentStake;
-    const profitAmount = profitValue ?? stake * (this.config.profitPercent / 100);
-    const profit = success ? profitAmount : -stake;
+    const profitAmount = profitValue ? profitValue : success ? stake * (this.config.profitPercent / 100) : -stake;
+    const profit = profitAmount;
 
     this.currentBalance += profit;
     this.sessionProfit += profit;

@@ -121,6 +121,7 @@ function checkCandleType(candle: CandleData) {
 // running every minute - America/Sao_Paulo
 const task = schedule('56 * * * * *', async () => {
   updateActivityTimestamp();
+  await sellExpiredContract();
 
   if(lastContractId) {
     getLastTradeResult(lastContractId);
@@ -359,7 +360,6 @@ function handleTradeResult({
 
   clearTradeTimeout();
 
-
   tradeWinRateManager.updateTradeResult(isWin);
 
 }
@@ -402,7 +402,6 @@ async function getLastTradeResult(contractId: number | undefined) {
         .catch((err) => console.error("Error trying to login", err))
     }
   }
-
 }
 
 const checkStakeAndBalance = (stake: number) => {
@@ -474,6 +473,27 @@ const startBot = async () => {
   }
 };
 
+const sellOpenContract = async (contractId: number) => {
+  try {
+    await apiManager.augmentedSend("sell", {
+      price: 0,
+      sell: contractId,
+    });
+
+    telegramManager.sendMessage("contract sold successfully.")
+  } catch (error) {
+    console.error("error selling contract", error);    
+  }
+}
+
+const sellExpiredContract = async () => {
+  try {
+    apiManager.augmentedSend("sell_expired", {});
+  } catch (error) {
+    console.error("Error selling expired contract", error);
+  }
+}
+
 const stopBot = async () => {
   updateActivityTimestamp(); // Atualizar timestamp ao parar o bot
   await clearSubscriptions();
@@ -482,10 +502,28 @@ const stopBot = async () => {
   telegramManager.sendMessage("🛑 Bot parado e desconectado dos serviços Deriv");
 };
 
+type TrailingStop = {
+  stopProfit: number;
+  isExpired: number;
+  isSelling: boolean;
+}
+
+const contractTrailingStop = new Map<Number, TrailingStop>([]);
+
 const subscribeToOpenOrders = () => {
   const contractSub = apiManager.augmentedSubscribe("proposal_open_contract");
+
+  const calculateTrailingStop = (profit: number) => {
+    if(profit >= 4) return 2;
+    if(profit >= 5) return 2.5;    
+    if(profit >= 6) return 3;
+    if(profit >= 7) return 4;
+    if(profit >= 8) return 6;
+    if(profit >= 9) return 7;
+    return 0;
+  }
   
-  const subscription = contractSub.subscribe(() => {
+  const subscription = contractSub.subscribe(async (data) => {
     updateActivityTimestamp();
 
     if (!telegramManager.isRunningBot()) {
@@ -497,20 +535,41 @@ const subscribeToOpenOrders = () => {
       return;
     }
 
-    // const contract = data.proposal_open_contract;
-    // const status = contract?.status;
-    // const profit = contract?.profit ?? 0;
-    // const stake = contract?.buy_price || 0;
-    // const exit_tick_display_value = contract?.exit_tick_display_value;
-    // const tick_stream = contract?.tick_stream;
+    const contract = data.proposal_open_contract;
+    const status = contract?.status;
+    const profit = contract?.profit ?? 0;
+    const isExpired = contract?.is_expired ?? 0;
+    const contractId = contract?.contract_id;
 
-    // handleTradeResult({
-    //   profit,
-    //   stake,
-    //   status: status ?? "open",
-    //   exit_tick_display_value,
-    //   tick_stream
-    // });
+    if(profit <= 0) return;
+
+    if(!contractId) return;
+
+    if(status !== "open") return;
+
+    if(!contractTrailingStop.has(contractId)) {
+      contractTrailingStop.set(contractId, { isExpired, stopProfit: 0, isSelling: false });
+    }
+
+    if(contractTrailingStop.get(contractId)?.isSelling) return;
+
+    const currentTStopObj = contractTrailingStop.get(contractId);
+
+    if(!currentTStopObj) return;
+
+    let currentTrailingStop = currentTStopObj.stopProfit;
+
+    const nextTrailingStop = calculateTrailingStop(profit);
+
+    if(nextTrailingStop > currentTrailingStop) {
+      contractTrailingStop.set(contractId, { ...currentTStopObj, stopProfit: nextTrailingStop });
+      currentTrailingStop = nextTrailingStop;
+    }
+
+    if(currentTrailingStop !== 0 && currentTrailingStop >= profit) {
+      contractTrailingStop.set(contractId, { ...currentTStopObj, isSelling: true });
+      await sellOpenContract(contractId);
+    }
 
   },(err) => {
     console.log("CONTRACT SUBSCRIPTION ERROR", err);    
@@ -530,6 +589,7 @@ const authorize = async () => {
     isAuthorized = false;
     telegramManager.sendMessage("❌ Erro ao autorizar bot na Deriv");
     await clearSubscriptions();
+    apiManager.connection.close();
     return false;
   }
 };
@@ -560,6 +620,10 @@ const updateActivityTimestamp = () => {
   lastActivityTimestamp = Date.now();
 };
 
+async function sleep(ms: number) {
+  return await new Promise((res) => setTimeout(res, ms));
+}
+
 
 async function main() {
   task.start();
@@ -588,6 +652,7 @@ async function main() {
     if (telegramManager.isRunningBot() && !subscriptions.contracts) {
       console.log("Tentando reconectar bot...");
       await clearSubscriptions();
+      await sleep(10_000)
       await startBot();
     } 
     // Se o bot não está marcado como rodando MAS tem subscrições ativas, limpa as subscrições
@@ -595,7 +660,7 @@ async function main() {
       console.log("Limpando subscrições pendentes...");      
       await clearSubscriptions();
     }
-  }, 10_000);
+  }, 20_000);
 }
 
 main();
