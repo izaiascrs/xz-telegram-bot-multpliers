@@ -120,7 +120,9 @@ const task = schedule('56 * * * * *', async () => {
   await sellExpiredContract();
   
   if(lastContractId) {
-    getLastTradeResult(lastContractId);
+    getLastTradeResult(lastContractId).catch(err => {
+      console.error("Erro ao obter resultado do último trade:", err);
+    });
   }
 
   if(telegramManager.isRunningBot() === false) {
@@ -268,16 +270,20 @@ const task = schedule('56 * * * * *', async () => {
 
 // Configura callback para quando atingir o lucro alvo
 moneyManager.setOnTargetReached(async (profit, balance) => {
-  const message = `🎯 Lucro alvo atingido!\n\n` +
-    `💰 Lucro: $${profit.toFixed(2)}\n` +
-    `🎯 Meta: $${config.targetProfit}\n` +
-    `💵 Saldo: $${balance.toFixed(2)}\n\n` +
-    `✨ Bot será reiniciado automaticamente amanhã às 09:00\n` +
-    `🛑 Bot parado com sucesso!`;
+  try {
+    const message = `🎯 Lucro alvo atingido!\n\n` +
+      `💰 Lucro: $${profit.toFixed(2)}\n` +
+      `🎯 Meta: $${config.targetProfit}\n` +
+      `💵 Saldo: $${balance.toFixed(2)}\n\n` +
+      `✨ Bot será reiniciado automaticamente amanhã às 09:00\n` +
+      `🛑 Bot parado com sucesso!`;
 
-  telegramManager.sendMessage(message);
-  await stopBot();
-  telegramManager.setBotRunning(false);
+    telegramManager.sendMessage(message);
+    await stopBot();
+    telegramManager.setBotRunning(false);
+  } catch (error) {
+    console.error("Erro no callback setOnTargetReached:", error);
+  }
 });
 
 
@@ -489,7 +495,7 @@ const sellOpenContract = async (contractId: number) => {
 
 const sellExpiredContract = async () => {
   try {
-    apiManager.augmentedSend("sell_expired", {});
+    await apiManager.augmentedSend("sell_expired", {});
   } catch (error) {
     console.error("Error selling expired contract", error);
   }
@@ -597,20 +603,24 @@ const authorize = async () => {
 
 // Adicionar verificação periódica do estado do bot
 setInterval(async () => {
-  if (telegramManager.isRunningBot() && !waitingVirtualLoss && moneyManager.getCurrentBalance() > 0) {
-    // Verificar se o bot está "travado"
-    const lastActivity = Date.now() - lastActivityTimestamp;
-    if (lastActivity > (60_000 * 40)) { // 40 minutos sem atividade
-      console.log("Detectado possível travamento do bot, resetando estados...");
-      isTrading = false;
-      // lastContractId = undefined;
-      // waitingVirtualLoss = false;
-      lastActivityTimestamp = Date.now();
-      await clearSubscriptions();
+  try {
+    if (telegramManager.isRunningBot() && !waitingVirtualLoss && moneyManager.getCurrentBalance() > 0) {
+      // Verificar se o bot está "travado"
+      const lastActivity = Date.now() - lastActivityTimestamp;
+      if (lastActivity > (60_000 * 40)) { // 40 minutos sem atividade
+        console.log("Detectado possível travamento do bot, resetando estados...");
+        isTrading = false;
+        // lastContractId = undefined;
+        // waitingVirtualLoss = false;
+        lastActivityTimestamp = Date.now();
+        await clearSubscriptions();
+      }
     }
-  }
 
-  apiManager.augmentedSend("ping").catch(console.error);
+    apiManager.augmentedSend("ping").catch(console.error);
+  } catch (error) {
+    console.error("Erro no setInterval de verificação periódica:", error);
+  }
 }, (28_000)); // 30 seconds
 
 // Adicionar timestamp da última atividade
@@ -629,40 +639,59 @@ async function main() {
   task.start();
 
   apiManager.connection.addEventListener("open", async () => {
-    telegramManager.sendMessage("🌐 Conexão WebSocket estabelecida");
-    await clearSubscriptions();
-    await authorize();
-    subscribeToOpenOrders();
+    try {
+      telegramManager.sendMessage("🌐 Conexão WebSocket estabelecida");
+      await clearSubscriptions();
+      await authorize();
+      subscribeToOpenOrders();
+    } catch (error) {
+      console.error("Erro no evento 'open' do WebSocket:", error);
+    }
   });
 
   apiManager.connection.addEventListener("close", async () => {
-    isAuthorized = false;
-    await clearSubscriptions();
-    telegramManager.sendMessage("⚠️ Conexão WebSocket fechada");
+    try {
+      isAuthorized = false;
+      await clearSubscriptions();
+      telegramManager.sendMessage("⚠️ Conexão WebSocket fechada");
+    } catch (error) {
+      console.error("Erro no evento 'close' do WebSocket:", error);
+    }
   });
 
   apiManager.connection.addEventListener("error", async (event) => {
-    console.error("Erro na conexão:", event);
-    isAuthorized = false;
-    telegramManager.sendMessage("❌ Erro na conexão com o servidor Deriv");
-    await clearSubscriptions();
+    try {
+      console.error("Erro na conexão:", event);
+      isAuthorized = false;
+      telegramManager.sendMessage("❌ Erro na conexão com o servidor Deriv");
+      await clearSubscriptions();
+    } catch (error) {
+      console.error("Erro no evento 'error' do WebSocket:", error);
+    }
   });
 
   // Observadores do estado do bot do Telegram
   setInterval(async () => {
-    // Se o bot está marcado como rodando mas não tem subscrições, tenta reconectar
-    if (telegramManager.isRunningBot() && !subscriptions.contracts) {
-      console.log("Tentando reconectar bot...");
-      await clearSubscriptions();
-      await sleep(10_000)
-      await startBot();
-    } 
-    // Se o bot não está marcado como rodando MAS tem subscrições ativas, limpa as subscrições
-    else if (!telegramManager.isRunningBot() && subscriptions.contracts) {
-      console.log("Limpando subscrições pendentes...");      
-      await clearSubscriptions();
+    try {
+      // Se o bot está marcado como rodando mas não tem subscrições, tenta reconectar
+      if (telegramManager.isRunningBot() && !subscriptions.contracts) {
+        console.log("Tentando reconectar bot...");
+        await clearSubscriptions();
+        await sleep(10_000)
+        await startBot();
+      } 
+      // Se o bot não está marcado como rodando MAS tem subscrições ativas, limpa as subscrições
+      else if (!telegramManager.isRunningBot() && subscriptions.contracts) {
+        console.log("Limpando subscrições pendentes...");      
+        await clearSubscriptions();
+      }
+    } catch (error) {
+      console.error("Erro no setInterval de observadores do bot:", error);
     }
   }, 20_000);
 }
 
-main();
+main().catch(err => {
+  console.error("Erro fatal ao iniciar a aplicação:", err);
+  process.exit(1);
+});
