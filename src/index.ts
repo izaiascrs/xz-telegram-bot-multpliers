@@ -16,26 +16,26 @@ import { CandleData } from "./technical-analysis/types";
 const ta = TechnicalAnalysis.getInstance();
 
 type TSymbol = (typeof symbols)[number];
-const symbols = ["R_10", "R_25", "R_50", "R_75", "R_100"] as const;
+const symbols = ["R_25", "R_50", "R_75"] as const;
+let lastTradedSymbol: TSymbol | undefined = undefined;
 
 const multipliersMap = new Map<TSymbol, number>([
-  ["R_10", 3000], // 3000 | 4000
-  ["R_25", 1200], // 1200 | 1600
-  ["R_50", 600], // 600 | 800
-  ["R_75", 300], // 300 | 500
-  ["R_100", 300], // 300 | 400
+  // ["R_10", 4000], // 3000 | 4000
+  ["R_25", 1600], // 1200 | 1600
+  ["R_50", 800], // 600 | 800
+  ["R_75", 500], // 300 | 500
+  // ["R_100", 400], // 300 | 400
 ]);
 
 const symbolsPipsNeeded = new Map<TSymbol, number>([
-  ["R_10", 1600], // normal
+  // ["R_10", 1600], // normal
   ["R_25", 2000], // normal
   ["R_50", 1970], // normal
   ["R_75", 1060], // normal
-  ["R_100", 230], // normal
+  // ["R_100", 230], // normal
 ]);
 
 const BALANCE_TO_START_TRADING = 1000;
-const CONTRACT_SECONDS = 2;
 
 const config: MoneyManagementV2 = {
   type: "fixed",
@@ -47,10 +47,6 @@ const config: MoneyManagementV2 = {
   initialBalance: BALANCE_TO_START_TRADING,
   targetProfit: 1000,
 };
-
-const tradeConfig = {
-  ticksCount: 10, 
-}
 
 let isAuthorized = false;
 let isTrading = false;
@@ -221,6 +217,9 @@ const task = schedule('56 * * * * *', async () => {
       const stake = moneyManager.calculateNextStake();
       const canTrade = checkStakeAndBalance(stake);
       if(canTrade === false) continue;
+
+      // avoid trading same symbol twice in row
+      if(lastTradedSymbol === symbol) return;
       
       const authorized = await authorize();
       if(!authorized) {
@@ -239,10 +238,12 @@ const task = schedule('56 * * * * *', async () => {
           amount: stake,
           basis: "stake",
           limit_order: {
-            take_profit: stake
+            take_profit: 7 // 70% of the stake
           }
         }
       })
+
+      lastTradedSymbol = symbol;
 
       lastContractId = res.buy?.contract_id;
       isTrading = true;
@@ -365,7 +366,7 @@ async function getLastTradeResult(contractId: number | undefined) {
 
     if(
       !data.proposal_open_contract?.is_expired &&
-      (!data.proposal_open_contract?.status ||  data.proposal_open_contract?.status === "open")
+      (!data.proposal_open_contract?.status || data.proposal_open_contract?.status === "open")
     ) return;
     
     const contract = data.proposal_open_contract;
@@ -385,7 +386,7 @@ async function getLastTradeResult(contractId: number | undefined) {
     });    
 
     isTrading = false;
-    lastContractId = undefined;
+    // lastContractId = undefined;
     // waitingVirtualLoss = false;
     tickCount = 0;
   } catch (error: any) {
@@ -535,41 +536,41 @@ const subscribeToOpenOrders = () => {
       return;
     }
 
-    const contract = data.proposal_open_contract;
-    const status = contract?.status;
-    const profit = contract?.profit ?? 0;
-    const isExpired = contract?.is_expired ?? 0;
-    const contractId = contract?.contract_id;
+    // const contract = data.proposal_open_contract;
+    // const status = contract?.status;
+    // const profit = contract?.profit ?? 0;
+    // const isExpired = contract?.is_expired ?? 0;
+    // const contractId = contract?.contract_id;
 
-    if(profit <= 0) return;
+    // if(profit <= 0) return;
 
-    if(!contractId) return;
+    // if(!contractId) return;
 
-    if(status !== "open") return;
+    // if(status !== "open") return;
 
-    if(!contractTrailingStop.has(contractId)) {
-      contractTrailingStop.set(contractId, { isExpired, stopProfit: 0, isSelling: false });
-    }
+    // if(!contractTrailingStop.has(contractId)) {
+    //   contractTrailingStop.set(contractId, { isExpired, stopProfit: 0, isSelling: false });
+    // }
 
-    const currentTStopObj = contractTrailingStop.get(contractId);
+    // const currentTStopObj = contractTrailingStop.get(contractId);
 
-    if(!currentTStopObj) return;
+    // if(!currentTStopObj) return;
 
-    let currentTrailingStop = currentTStopObj.stopProfit;
+    // let currentTrailingStop = currentTStopObj.stopProfit;
 
-    const nextTrailingStop = calculateTrailingStop(profit);
+    // const nextTrailingStop = calculateTrailingStop(profit);
 
-    if(nextTrailingStop > currentTrailingStop) {
-      contractTrailingStop.set(contractId, { ...currentTStopObj, stopProfit: nextTrailingStop });
-      currentTrailingStop = nextTrailingStop;
-    }
+    // if(nextTrailingStop > currentTrailingStop) {
+    //   contractTrailingStop.set(contractId, { ...currentTStopObj, stopProfit: nextTrailingStop });
+    //   currentTrailingStop = nextTrailingStop;
+    // }
 
-    if(currentTrailingStop !== 0 && currentTrailingStop >= profit) {
-      console.log("SELLING TRAILING STOP HIT!...");
+    // if(currentTrailingStop !== 0 && currentTrailingStop >= profit) {
+    //   console.log("SELLING TRAILING STOP HIT!...");
       
-      contractTrailingStop.set(contractId, { ...currentTStopObj, isSelling: true });
-      await sellOpenContract(contractId);
-    }
+    //   contractTrailingStop.set(contractId, { ...currentTStopObj, isSelling: true });
+    //   await sellOpenContract(contractId);
+    // }
 
   },(err) => {
     console.log("CONTRACT SUBSCRIPTION ERROR", err);    
@@ -602,7 +603,7 @@ setInterval(async () => {
     if (lastActivity > (60_000 * 40)) { // 40 minutos sem atividade
       console.log("Detectado possível travamento do bot, resetando estados...");
       isTrading = false;
-      lastContractId = undefined;
+      // lastContractId = undefined;
       // waitingVirtualLoss = false;
       lastActivityTimestamp = Date.now();
       await clearSubscriptions();
@@ -629,7 +630,9 @@ async function main() {
 
   apiManager.connection.addEventListener("open", async () => {
     telegramManager.sendMessage("🌐 Conexão WebSocket estabelecida");
+    await clearSubscriptions();
     await authorize();
+    subscribeToOpenOrders();
   });
 
   apiManager.connection.addEventListener("close", async () => {
