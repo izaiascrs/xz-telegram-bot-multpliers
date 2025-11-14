@@ -16,15 +16,15 @@ import { CandleData } from "./technical-analysis/types";
 const ta = TechnicalAnalysis.getInstance();
 
 type TSymbol = (typeof symbols)[number];
-const symbols = ["R_25", "R_50", "R_75"] as const;
+const symbols = ["R_10", "R_25", "R_50", "R_75", "R_100"] as const;
 let lastTradedSymbol: TSymbol | undefined = undefined;
 
 const multipliersMap = new Map<TSymbol, number>([
-  // ["R_10", 4000], // 3000 | 4000
-  ["R_25", 1600], // 1200 | 1600
-  ["R_50", 800], // 600 | 800
-  ["R_75", 500], // 300 | 500
-  // ["R_100", 400], // 300 | 400
+  ["R_10", 3000], // 3000 | 4000
+  ["R_25", 1200], // 1200 | 1600
+  ["R_50", 600], // 600 | 800
+  ["R_75", 300], // 300 | 500
+  ["R_100", 300], // 300 | 400
 ]);
 
 const symbolsPipsNeeded = new Map<TSymbol, number>([
@@ -240,7 +240,7 @@ const task = schedule('56 * * * * *', async () => {
           amount: stake,
           basis: "stake",
           limit_order: {
-            take_profit: 7 // 70% of the stake
+            take_profit: stake
           }
         }
       })
