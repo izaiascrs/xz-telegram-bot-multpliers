@@ -205,11 +205,11 @@ const task = schedule('56 * * * * *', async () => {
       // if(!lastZeroLagData) continue;
       // if (lastZeroLagData.trendChange === false) continue;
     
-      let contractType: NonNullable<BuyContractRequest["parameters"]>["contract_type"] = "MULTDOWN";
+      let contractType: NonNullable<BuyContractRequest["parameters"]>["contract_type"] = "MULTUP";
     
       // bearish trend
       if(validCandleUpperDistance) {
-        contractType = "MULTUP"
+        contractType = "MULTDOWN"
       }
 
       // if(multipliersDirectionMap.get(symbol) === false) {
